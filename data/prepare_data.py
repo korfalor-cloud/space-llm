@@ -7,6 +7,7 @@ Sources: Wikipedia (space articles), arXiv (astro-ph), NASA public text.
 import os
 import re
 import json
+import time
 import hashlib
 import requests
 import numpy as np
@@ -71,39 +72,88 @@ def is_space_related(text: str) -> bool:
 # ─── Wikipedia ────────────────────────────────────────────────────────────────
 
 def download_wikipedia() -> List[str]:
-    """Download and filter Wikipedia articles about space."""
-    print("[Wikipedia] Downloading space-related articles...")
-    from datasets import load_dataset
-
+    """Download and filter Wikipedia articles about space using Wikipedia API."""
+    print("[Wikipedia] Downloading space-related articles via Wikipedia API...")
     texts = []
-    try:
-        ds = load_dataset("wikipedia", "20220301.en", split="train", streaming=True)
-        count = 0
-        for article in tqdm(ds, desc="[Wikipedia] Filtering"):
-            text = article.get("text", "")
-            title = article.get("title", "")
-            if is_space_related(text) or is_space_related(title):
-                cleaned = clean_text(text)
-                if len(cleaned) > 200:
-                    texts.append(cleaned)
-                    count += 1
-            if count >= 50000:
-                break
-    except Exception as e:
-        print(f"[Wikipedia] Error: {e}")
-        print("[Wikipedia] Falling back to smaller dataset...")
+
+    # Use Wikipedia's search + parse API directly (more reliable than HF datasets)
+    space_search_terms = [
+        "astronomy", "planet", "star", "galaxy", "nebula", "supernova",
+        "black hole", "cosmology", "telescope", "spacecraft", "NASA",
+        "solar system", "exoplanet", "gravitational wave", "dark matter",
+        "dark energy", "big bang", "cosmic microwave background",
+        "Milky Way", "Andromeda galaxy", "Hubble Space Telescope",
+        "James Webb Space Telescope", "Mars exploration", "Jupiter planet",
+        "Saturn planet", "Venus planet", "Mercury planet", "Neptune planet",
+        "asteroid belt", "Kuiper belt", "Oort cloud", "comet", "meteor",
+        "lunar eclipse", "solar eclipse", "constellation", "light year",
+        "redshift", "quasar", "pulsar", "neutron star", "white dwarf",
+        "main sequence star", "red giant", "stellar evolution",
+        "nuclear fusion", "heliosphere", "magnetosphere", "ionosphere",
+        "International Space Station", "Apollo program", "Space Shuttle",
+        "Voyager program", "Mars rover", "Curiosity rover", "Perseverance",
+        "rocket propulsion", "orbital mechanics", "space suit",
+        "astronaut", "cosmonaut", "spacewalk", "space station",
+        "Hertzsprung-Russell diagram", "spectral class", "absolute magnitude",
+        "parallax", "standard candle", "Cepheid variable",
+        "Type Ia supernova", "core collapse", "neutron star",
+        "event horizon", "singularity", "spacetime", "general relativity",
+        "special relativity", "gravitational lensing", "frame dragging",
+        "Hawking radiation", "Penrose process", "Blandford-Znajek",
+        "cosmic ray", "solar wind", "aurora", "Van Allen belt",
+        "planetary ring", "tidal force", "Roche limit", "Hill sphere",
+        "Lagrange point", "gravitational assist", "slingshot effect",
+        "Kepler's laws", "Newton's law of gravitation", "escape velocity",
+        "Hohmann transfer", "geostationary orbit", "polar orbit",
+        "space debris", "Kessler syndrome", "space weather",
+        "solar flare", "coronal mass ejection", "sunspot", "solar cycle",
+    ]
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "SpaceLLM/1.0 (educational project)"})
+
+    for term in tqdm(space_search_terms, desc="[Wikipedia] Searching"):
         try:
-            ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
-            count = 0
-            for article in tqdm(ds, desc="[Wikipedia/Wikitext] Filtering"):
-                text = article.get("text", "")
-                if is_space_related(text) and len(text) > 200:
-                    texts.append(clean_text(text))
-                    count += 1
-                if count >= 10000:
-                    break
-        except Exception as e2:
-            print(f"[Wikipedia/Wikitext] Error: {e2}")
+            # Search for articles
+            search_url = "https://en.wikipedia.org/w/api.php"
+            search_params = {
+                "action": "query",
+                "list": "search",
+                "srsearch": term,
+                "srlimit": 20,
+                "format": "json",
+            }
+            resp = session.get(search_url, params=search_params, timeout=15)
+            if resp.status_code != 200:
+                continue
+
+            results = resp.json().get("query", {}).get("search", [])
+            for result in results:
+                title = result.get("title", "")
+                page_id = result.get("pageid")
+
+                # Fetch article content
+                page_params = {
+                    "action": "query",
+                    "pageids": page_id,
+                    "prop": "extracts",
+                    "explaintext": True,
+                    "format": "json",
+                }
+                page_resp = session.get(search_url, params=page_params, timeout=15)
+                if page_resp.status_code != 200:
+                    continue
+
+                pages = page_resp.json().get("query", {}).get("pages", {})
+                for page in pages.values():
+                    extract = page.get("extract", "")
+                    if len(extract) > 300:
+                        texts.append(f"# {title}\n\n{extract}")
+
+            time.sleep(0.1)  # Rate limiting
+
+        except Exception as e:
+            continue
 
     print(f"[Wikipedia] Collected {len(texts)} articles")
     return texts
@@ -115,26 +165,33 @@ def download_arxiv() -> List[str]:
     """Download astronomy/astrophysics abstracts from arXiv."""
     print("[arXiv] Downloading astronomy abstracts...")
     texts = []
-    categories = ["astro-ph", "gr-qc", "hep-ph"]  # Astrophysics, General Relativity, High Energy Physics
+    categories = ["astro-ph", "gr-qc", "hep-ph"]
     base_url = "http://export.arxiv.org/api/query"
 
     for cat in categories:
         start = 0
-        max_results = 2000
+        max_results = 500
+        retries = 0
+        max_retries = 3
+
         while start < max_results:
             try:
                 params = {
                     "search_query": f"cat:{cat}*",
                     "start": start,
-                    "max_results": 100,
+                    "max_results": 50,
                     "sortBy": "submittedDate",
                     "sortOrder": "descending",
                 }
-                resp = requests.get(base_url, params=params, timeout=30)
+                resp = requests.get(base_url, params=params, timeout=60)
                 if resp.status_code != 200:
-                    break
+                    retries += 1
+                    if retries >= max_retries:
+                        break
+                    time.sleep(5)
+                    continue
 
-                # Parse XML manually to avoid lxml dependency
+                retries = 0
                 content = resp.text
                 entries = content.split("<entry>")[1:]
                 if not entries:
@@ -151,7 +208,15 @@ def download_arxiv() -> List[str]:
                         if len(text) > 50:
                             texts.append(text)
 
-                start += 100
+                start += 50
+                time.sleep(3)  # Rate limiting for arXiv API
+
+            except requests.exceptions.Timeout:
+                retries += 1
+                print(f"[arXiv] Timeout at {start}, retry {retries}/{max_retries}")
+                if retries >= max_retries:
+                    break
+                time.sleep(10)
             except Exception as e:
                 print(f"[arXiv] Error at {start}: {e}")
                 break

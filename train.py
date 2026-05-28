@@ -141,7 +141,9 @@ def train(
     print(f"Device: {device}")
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
-        print(f"Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        props = torch.cuda.get_device_properties(0)
+        mem = getattr(props, 'total_memory', None) or getattr(props, 'total_mem', 0)
+        print(f"Memory: {mem / 1e9:.1f} GB")
 
     # Create model
     model = SpaceLLM(model_config).to(device)
