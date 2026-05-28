@@ -1,1 +1,1 @@
-from .transformer import SpaceLLM, TransformerBlock, MultiHeadAttention, FeedForward, RoPE
+from .transformer import SpaceLLM, TransformerBlock, MultiHeadAttention, SwiGLU, RoPE
