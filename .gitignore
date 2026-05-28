@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data and model artifacts
+data/
+models/
+outputs/
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Logs
+wandb/
+runs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kaggle
+kaggle.json

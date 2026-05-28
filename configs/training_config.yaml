@@ -1,0 +1,160 @@
+# ============================================================
+# Math AI Model - Complete Math Training Configuration
+# ============================================================
+# Trains on ALL available open-source math instruction datasets
+# Covers: arithmetic, algebra, geometry, calculus, probability,
+#         number theory, combinatorics, competition math, and more
+# ============================================================
+
+# Model Configuration
+model:
+  name: "Qwen/Qwen2.5-Math-1.5B"
+  max_seq_length: 2048
+  load_in_4bit: true
+
+# LoRA Configuration
+lora:
+  r: 64
+  alpha: 128
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Training Configuration
+training:
+  output_dir: "./outputs/math-model"
+  num_train_epochs: 3
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  logging_steps: 10
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  optim: "paged_adamw_8bit"
+  max_grad_norm: 0.3
+  report_to: "none"
+
+# ============================================================
+# Data Configuration - ALL MATH DATASETS
+# ============================================================
+data:
+  # How many total examples to use (null = use all available)
+  # With T4 16GB VRAM, ~500K-1M examples is a good target
+  max_total_samples: null
+
+  val_split: 0.01
+  num_proc: 4
+
+  datasets:
+    # ---- TIER 1: Core Instruction Tuning (high quality, proven) ----
+
+    - name: "meta-math/MetaMathQA"
+      split: "train"
+      format: "meta_math"
+      max_samples: null  # 395K examples
+      description: "Augmented GSM8K+MATH problems with rephrasing and backward reasoning"
+
+    - name: "TIGER-Lab/MathInstruct"
+      split: "train"
+      format: "math_instruct"
+      max_samples: null  # 262K examples
+      description: "13 math datasets combined, CoT and PoT formats"
+
+    - name: "microsoft/orca-math-word-problems-200k"
+      split: "train"
+      format: "orca_math"
+      max_samples: null  # 200K examples
+      description: "GPT-4 Turbo grade school math solutions"
+
+    - name: "AI-MO/NuminaMath-CoT"
+      split: "train"
+      format: "numina_math"
+      max_samples: null  # 860K examples
+      description: "Competition + K-12 math with chain-of-thought"
+
+    - name: "nvidia/OpenMathInstruct-2"
+      split: "train_2M"
+      format: "open_math_instruct"
+      max_samples: 500000  # Use 500K from 14.7M (balance quality/speed)
+      description: "Large-scale synthetic math from Llama3.1-405B"
+
+    # ---- TIER 2: High-Quality Reasoning Traces ----
+
+    - name: "open-r1/OpenR1-Math-220k"
+      split: "train"
+      format: "open_r1_math"
+      max_samples: null  # 220K examples
+      description: "DeepSeek R1 reasoning traces on math problems"
+
+    - name: "nvidia/AceReason-Math"
+      split: "train"
+      format: "ace_reason"
+      max_samples: null  # 50K examples
+      description: "Challenging math for strong reasoning"
+
+    # ---- TIER 3: Foundational Benchmarks (train split) ----
+
+    - name: "openai/gsm8k"
+      split: "train"
+      format: "gsm8k"
+      max_samples: null  # 7.5K examples
+      description: "Grade school math word problems"
+
+    - name: "EleutherAI/hendrycks_math"
+      split: "train"
+      format: "hendrycks_math"
+      max_samples: null  # 7.5K examples
+      description: "Competition math (7 subjects, difficulty 1-5)"
+
+    - name: "allenai/math_qa"
+      split: "train"
+      format: "math_qa"
+      max_samples: null  # 30K examples
+      description: "Math word problems with operation formalisms"
+
+    # ---- TIER 4: Specialized & Diverse ----
+
+    - name: "camel-ai/math"
+      split: "train"
+      format: "camel_math"
+      max_samples: null  # 50K examples
+      description: "GPT-4 generated math across 25 topics, 625 subtopics"
+
+    - name: "SynthLabsAI/Big-Math-RL-Verified"
+      split: "train"
+      format: "big_math"
+      max_samples: null  # 251K examples
+      description: "Curated problems with verifiable solutions"
+
+    - name: "BytedTsinghua-SIA/DAPO-Math-17k"
+      split: "train"
+      format: "dapo_math"
+      max_samples: 100000  # Use 100K from 1.79M
+      description: "Competition-style math from ByteDance+Tsinghua"
+
+    # ---- TIER 5: Additional Coverage ----
+
+    - name: "deepmind/aqua_rat"
+      split: "train"
+      format: "aqua_rat"
+      max_samples: null  # ~100K examples
+      description: "Algebraic reasoning with rationales"
+
+    - name: "allenai/lila"
+      split: "train"
+      format: "lila"
+      max_samples: null
+      description: "Diverse math problem aggregation"
