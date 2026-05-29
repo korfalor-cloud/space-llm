@@ -197,6 +197,17 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class Embedding(nn.Module):
+    """Custom embedding layer since flax.linen removed nn.Embedding."""
+    num_embeddings: int
+    features: int
+
+    @nn.compact
+    def __call__(self, x):
+        embedding = self.param("embedding", jax.nn.initializers.normal(stddev=0.02), (self.num_embeddings, self.features))
+        return embedding[x]
+
+
 class SpaceLLM(nn.Module):
     config: ModelConfig
 
@@ -206,7 +217,7 @@ class SpaceLLM(nn.Module):
         B, T = input_ids.shape
 
         # Token embedding
-        x = nn.Embedding(cfg.vocab_size, cfg.d_model, name="tok_emb")(input_ids)
+        x = Embedding(cfg.vocab_size, cfg.d_model, name="tok_emb")(input_ids)
         x = nn.Dropout(rate=cfg.dropout)(x, deterministic=deterministic)
 
         # Causal mask: (1, 1, T, T)
