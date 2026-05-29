@@ -561,7 +561,12 @@ def train():
     meta = prepare_data()
     import sentencepiece as spm
     base_dir = "/kaggle/working" if os.path.exists("/kaggle") else "."
-    tokenizer = spm.SentencePieceProcessor(model_file=f"{base_dir}/data/tokenizer/space_tokenizer.model")
+    # Find tokenizer - check corpus dir first, then data dir
+    corpus_tok = base_dir / "space_corpus" / "tokenized" / "space_tokenizer.model"
+    data_tok = base_dir / "data" / "tokenizer" / "space_tokenizer.model"
+    tokenizer_path = str(corpus_tok) if corpus_tok.exists() else str(data_tok)
+    tokenizer = spm.SentencePieceProcessor(model_file=tokenizer_path)
+    print(f"Tokenizer: {tokenizer_path} | Vocab: {tokenizer.get_piece_size()}")
 
     # Config
     model_config = ModelConfig(vocab_size=meta["vocab_size"])
