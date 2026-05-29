@@ -44,7 +44,7 @@ import optax
 
 print(f"JAX version: {jax.__version__}")
 print(f"Devices: {jax.devices()}")
-print(f"Platform: {jax.platform()}")
+print(f"Backend: {jax.default_backend()}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -606,7 +606,7 @@ def generate(state, tokenizer, prompt, max_new_tokens=150, temperature=0.7, top_
 def train():
     print(f"JAX devices: {jax.devices()}")
     print(f"Device count: {jax.device_count()}")
-    print(f"Platform: {jax.platform()}")
+    print(f"Backend: {jax.default_backend()}")
 
     # Prepare data
     meta = prepare_data()
