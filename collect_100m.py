@@ -25,13 +25,11 @@ from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Install dependencies
+# Install dependencies with compatible versions
 def setup():
-    for pkg in ["datasets", "sentencepiece", "tqdm", "requests"]:
-        try:
-            __import__(pkg)
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "datasets>=2.14.0,<3.0.0", "pyarrow>=12.0.0,<15.0.0",
+                           "sentencepiece", "tqdm", "requests", "-q"])
 
 setup()
 
