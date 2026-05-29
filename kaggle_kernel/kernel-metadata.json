@@ -5,8 +5,8 @@
   "code_file": "script.py",
   "kernel_type": "script",
   "is_private": false,
-  "enable_gpu": true,
-  "enable_tpu": false,
+  "enable_gpu": false,
+  "enable_tpu": true,
   "enable_internet": true,
   "dataset_sources": [
     "shivanshyadav96/space-llm-code"

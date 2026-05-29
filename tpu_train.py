@@ -416,12 +416,14 @@ def generate_space_knowledge():
 
 def prepare_data():
     base_dir = Path("/kaggle/working") if os.path.exists("/kaggle") else Path(".")
-    # Check for pre-collected data first
+    # Check for pre-collected data first (from collect_100m.py)
     corpus_dir = base_dir / "space_corpus" / "tokenized"
     if corpus_dir.exists() and (corpus_dir / "meta.json").exists():
-        print("[Skip] Using pre-collected corpus.")
+        print("[Using] Pre-collected 100M token corpus")
         with open(corpus_dir / "meta.json") as f:
-            return json.load(f)
+            meta = json.load(f)
+        print(f"  Tokens: {meta.get('total_tokens', 0):,}")
+        return meta
 
     data_dir = base_dir / "data"
     tokenized_dir = data_dir / "tokenized"
@@ -586,9 +588,15 @@ def train():
     tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.95, weight_decay=train_config.weight_decay)
     opt_state = tx.init(params)
 
-    # Load data
-    train_data = np.load(f"{base_dir}/data/tokenized/train.npy")
-    val_data = np.load(f"{base_dir}/data/tokenized/val.npy")
+    # Load data - check for pre-collected corpus first
+    corpus_dir = base_dir / "space_corpus" / "tokenized"
+    if corpus_dir.exists() and (corpus_dir / "train.npy").exists():
+        data_path = corpus_dir
+    else:
+        data_path = base_dir / "data" / "tokenized"
+
+    train_data = np.load(data_path / "train.npy")
+    val_data = np.load(data_path / "val.npy")
 
     train_inputs, train_targets = make_batches(train_data, model_config.max_seq_len, train_config.batch_size)
     val_inputs, val_targets = make_batches(val_data, model_config.max_seq_len, train_config.batch_size)
