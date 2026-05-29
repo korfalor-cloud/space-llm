@@ -28,7 +28,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Install dependencies with compatible versions
 def setup():
     subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "datasets>=2.14.0,<3.0.0", "pyarrow>=12.0.0,<15.0.0",
+                           "numpy<2.0.0", "-q"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install",
+                           "pyarrow>=14.0.0,<16.0.0", "datasets>=2.18.0,<3.0.0",
                            "sentencepiece", "tqdm", "requests", "-q"])
 
 setup()
