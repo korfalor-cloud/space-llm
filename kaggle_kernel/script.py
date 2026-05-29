@@ -1,18 +1,15 @@
 """
-Space LLM - 100M Token Training Pipeline
-Collects data from ALL sources and trains a 10M parameter model.
+Space LLM - 100M Token Collection + PyTorch GPU Training
+Collects data from ALL sources then trains on T4 GPU.
 """
 
 import subprocess
 import sys
 import os
 
-# Install all dependencies
+# Install dependencies
 subprocess.check_call([sys.executable, "-m", "pip", "install",
-                       "jax[tpu]", "-f",
-                       "https://storage.googleapis.com/jax-releases/libtpu_releases.html", "-q"])
-subprocess.check_call([sys.executable, "-m", "pip", "install",
-                       "flax", "optax", "sentencepiece", "datasets", "tqdm", "-q"])
+                       "sentencepiece", "tqdm", "requests", "-q"])
 
 # Clone repo
 if not os.path.exists("space-llm"):
@@ -28,9 +25,9 @@ print("="*60)
 from collect_100m import main as collect_data
 collect_data()
 
-# Step 2: Train the model
+# Step 2: Train with PyTorch on GPU
 print("\n" + "="*60)
-print("STEP 2: TRAINING MODEL")
+print("STEP 2: TRAINING MODEL ON GPU")
 print("="*60)
-from tpu_train import train
+from train import train
 train()

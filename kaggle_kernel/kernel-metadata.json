@@ -1,16 +1,15 @@
 {
-  "title": "space-llm-100m-training",
-  "id": "shivanshyadav96/space-llm-100m-training",
+  "title": "space-llm-100m-gpu",
+  "id": "shivanshyadav96/space-llm-100m-gpu",
   "language": "python",
   "code_file": "script.py",
   "kernel_type": "script",
   "is_private": false,
-  "enable_gpu": false,
-  "enable_tpu": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
   "enable_internet": true,
   "dataset_sources": [
-    "shivanshyadav96/space-llm-code",
-    "shivanshyadav96/space-llm-v2-checkpoints"
+    "shivanshyadav96/space-llm-code"
   ],
   "competition_sources": [],
   "model_sources": []

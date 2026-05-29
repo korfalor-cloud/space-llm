@@ -20,17 +20,27 @@ from model.transformer import SpaceLLM
 class TokenDataset(Dataset):
     """Memory-mapped token dataset for efficient loading."""
 
-    def __init__(self, data_path: str, seq_len: int):
+    def __init__(self, data_path: str, seq_len: int, split: str = "train"):
         meta_path = Path(data_path) / "meta.json"
         with open(meta_path) as f:
             meta = json.load(f)
 
-        self.data = np.memmap(
-            Path(data_path) / "train.bin",
-            dtype=np.uint16,
-            mode="r",
-            shape=meta["train_tokens"],
-        )
+        # Support both .npy and .bin formats
+        npy_path = Path(data_path) / f"{split}.npy"
+        bin_path = Path(data_path) / f"{split}.bin"
+
+        if npy_path.exists():
+            self.data = np.load(npy_path, mmap_mode='r')
+        elif bin_path.exists():
+            self.data = np.memmap(
+                bin_path,
+                dtype=np.uint16,
+                mode="r",
+                shape=meta[f"{split}_tokens"],
+            )
+        else:
+            raise FileNotFoundError(f"No data file found at {npy_path} or {bin_path}")
+
         self.seq_len = seq_len
         self.total_tokens = len(self.data)
 
@@ -53,12 +63,22 @@ class ValDataset(Dataset):
         with open(meta_path) as f:
             meta = json.load(f)
 
-        self.data = np.memmap(
-            Path(data_path) / "val.bin",
-            dtype=np.uint16,
-            mode="r",
-            shape=meta["val_tokens"],
-        )
+        # Support both .npy and .bin formats
+        npy_path = Path(data_path) / "val.npy"
+        bin_path = Path(data_path) / "val.bin"
+
+        if npy_path.exists():
+            self.data = np.load(npy_path, mmap_mode='r')
+        elif bin_path.exists():
+            self.data = np.memmap(
+                bin_path,
+                dtype=np.uint16,
+                mode="r",
+                shape=meta["val_tokens"],
+            )
+        else:
+            raise FileNotFoundError(f"No val data found at {npy_path} or {bin_path}")
+
         self.seq_len = seq_len
         self.total_tokens = len(self.data)
 
@@ -145,13 +165,22 @@ def train(
         mem = getattr(props, 'total_memory', None) or getattr(props, 'total_mem', 0)
         print(f"Memory: {mem / 1e9:.1f} GB")
 
+    # Check for new data path and load vocab size
+    data_dir = train_config.data_dir
+    if os.path.exists("space_corpus/tokenized/meta.json"):
+        data_dir = "space_corpus/tokenized"
+    with open(Path(data_dir) / "meta.json") as f:
+        meta = json.load(f)
+    model_config.vocab_size = meta.get("vocab_size", model_config.vocab_size)
+    print(f"Vocab size: {model_config.vocab_size}")
+
     # Create model
     model = SpaceLLM(model_config).to(device)
     print(f"Parameters: {model.get_num_params():,}")
 
     # Datasets
-    train_dataset = TokenDataset(train_config.data_dir, model_config.max_seq_len)
-    val_dataset = ValDataset(train_config.data_dir, model_config.max_seq_len)
+    train_dataset = TokenDataset(data_dir, model_config.max_seq_len, "train")
+    val_dataset = ValDataset(data_dir, model_config.max_seq_len)
 
     train_loader = DataLoader(
         train_dataset,
