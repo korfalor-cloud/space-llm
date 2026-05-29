@@ -1,6 +1,6 @@
 {
-  "title": "space-llm-tpu-training",
-  "id": "shivanshyadav96/space-llm-tpu-training",
+  "title": "space-llm-continued-training",
+  "id": "shivanshyadav96/space-llm-continued-training",
   "language": "python",
   "code_file": "script.py",
   "kernel_type": "script",
@@ -8,7 +8,10 @@
   "enable_gpu": false,
   "enable_tpu": true,
   "enable_internet": true,
-  "dataset_sources": ["shivanshyadav96/space-llm-code"],
+  "dataset_sources": [
+    "shivanshyadav96/space-llm-code",
+    "shivanshyadav96/space-llm-checkpoints"
+  ],
   "competition_sources": [],
   "model_sources": []
 }

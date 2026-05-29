@@ -1,13 +1,15 @@
 """
-Space LLM - Kaggle TPU Training (JAX/Flax)
-Custom 10M parameter decoder-only transformer.
-Architecture: RoPE, SwiGLU, 6 layers, 256d, 8 heads
-Hardware: TPU v3-8 or v5e-8
+Space LLM - Continued Training with More Data
+Loads existing trained model and trains on expanded dataset.
 """
 
 import subprocess
 import sys
 import os
+import shutil
+
+# Install dependencies
+subprocess.check_call([sys.executable, "-m", "pip", "install", "sentencepiece", "-q"])
 
 # Clone repo
 if not os.path.exists("space-llm"):
@@ -16,6 +18,17 @@ if not os.path.exists("space-llm"):
 os.chdir("space-llm")
 sys.path.insert(0, ".")
 
-# Run TPU training (installs JAX/TPU dependencies automatically)
-from tpu_train import train
+# Copy checkpoints from Kaggle input
+src = "/kaggle/input/space-llm-checkpoints/checkpoints"
+dst = "checkpoints_v2"
+if os.path.exists(src):
+    os.makedirs(dst, exist_ok=True)
+    for f in os.listdir(src):
+        shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
+    print(f"Copied checkpoints from {src}")
+else:
+    print(f"No checkpoints at {src}, training from scratch")
+
+# Run continued training
+from tpu_train_continue import train
 train()
