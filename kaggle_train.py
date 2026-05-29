@@ -445,10 +445,15 @@ def prepare_data():
         for t in unique:
             f.write(t.replace("\n", " ") + "\n")
 
+    # Adaptive vocab size based on corpus
+    total_chars = sum(len(t) for t in unique)
+    max_vocab = min(32000, max(1000, total_chars // 10))
+    print(f"[Tokenizer] Corpus: {total_chars:,} chars, vocab_size={max_vocab}")
+
     model_prefix = str(tokenizer_dir / "space_tokenizer")
     spm.SentencePieceTrainer.train(
         input=str(corpus_file), model_prefix=model_prefix,
-        vocab_size=32000, model_type="bpe", character_coverage=0.9995,
+        vocab_size=max_vocab, model_type="bpe", character_coverage=0.9995,
         num_threads=4, split_digits=True, byte_fallback=True,
         unk_id=0, bos_id=1, eos_id=2, pad_id=3,
     )
@@ -533,6 +538,12 @@ def train():
 
     prepare_data()
 
+    # Load actual vocab size from tokenizer
+    with open("/kaggle/working/data/tokenized/meta.json") as f:
+        meta = json.load(f)
+    model_config.vocab_size = meta["vocab_size"]
+    print(f"Vocab size: {model_config.vocab_size}")
+
     model = SpaceLLM(model_config).to(device)
     print(f"Parameters: {model.get_num_params():,}")
 
@@ -603,7 +614,7 @@ def train():
                f"{train_config.checkpoint_dir}/final.pt")
 
     with open(f"{train_config.checkpoint_dir}/model_config.json", "w") as f:
-        json.dump({"vocab_size": 32000, "d_model": 256, "n_heads": 8, "n_layers": 6,
+        json.dump({"vocab_size": model_config.vocab_size, "d_model": 256, "n_heads": 8, "n_layers": 6,
                     "d_ff": 1024, "max_seq_len": 512, "dropout": 0.1, "activation": "swiglu",
                     "use_rope": True, "tie_weights": True, "norm_eps": 1e-5}, f, indent=2)
 
