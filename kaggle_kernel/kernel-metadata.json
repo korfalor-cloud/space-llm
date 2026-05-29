@@ -1,6 +1,6 @@
 {
-  "title": "space-llm-continued-training",
-  "id": "shivanshyadav96/space-llm-continued-training",
+  "title": "space-llm-100m-training",
+  "id": "shivanshyadav96/space-llm-100m-training",
   "language": "python",
   "code_file": "script.py",
   "kernel_type": "script",
@@ -10,7 +10,7 @@
   "enable_internet": true,
   "dataset_sources": [
     "shivanshyadav96/space-llm-code",
-    "shivanshyadav96/space-llm-checkpoints"
+    "shivanshyadav96/space-llm-v2-checkpoints"
   ],
   "competition_sources": [],
   "model_sources": []

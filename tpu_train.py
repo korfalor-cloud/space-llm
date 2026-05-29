@@ -416,6 +416,13 @@ def generate_space_knowledge():
 
 def prepare_data():
     base_dir = Path("/kaggle/working") if os.path.exists("/kaggle") else Path(".")
+    # Check for pre-collected data first
+    corpus_dir = base_dir / "space_corpus" / "tokenized"
+    if corpus_dir.exists() and (corpus_dir / "meta.json").exists():
+        print("[Skip] Using pre-collected corpus.")
+        with open(corpus_dir / "meta.json") as f:
+            return json.load(f)
+
     data_dir = base_dir / "data"
     tokenized_dir = data_dir / "tokenized"
     tokenizer_dir = data_dir / "tokenizer"
