@@ -560,7 +560,7 @@ def train():
     # Prepare data
     meta = prepare_data()
     import sentencepiece as spm
-    base_dir = "/kaggle/working" if os.path.exists("/kaggle") else "."
+    base_dir = Path("/kaggle/working") if os.path.exists("/kaggle") else Path(".")
     # Find tokenizer - check corpus dir first, then data dir
     corpus_tok = base_dir / "space_corpus" / "tokenized" / "space_tokenizer.model"
     data_tok = base_dir / "data" / "tokenizer" / "space_tokenizer.model"
