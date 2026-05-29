@@ -13,21 +13,19 @@ import math
 import hashlib
 import subprocess
 import sys
+import pickle
 import requests
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
 from pathlib import Path
 from tqdm import tqdm
 
-# Install JAX with TPU support on Kaggle
+# Install JAX/Flax on Kaggle
 def setup_tpu():
-    """Setup JAX for Kaggle TPU."""
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install",
                                "jax[tpu]", "-f",
-                               "https://storage.googleapis.com/jax-releases/libtpu_releases.html",
-                               "-q"])
+                               "https://storage.googleapis.com/jax-releases/libtpu_releases.html", "-q"])
         subprocess.check_call([sys.executable, "-m", "pip", "install",
                                "flax", "optax", "sentencepiece", "-q"])
     except:
@@ -35,16 +33,12 @@ def setup_tpu():
 
 setup_tpu()
 
-# JAX/Flax imports
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from flax.training import train_state
 import optax
 
-print(f"JAX version: {jax.__version__}")
-print(f"Devices: {jax.devices()}")
-print(f"Backend: {jax.default_backend()}")
+print(f"JAX: {jax.__version__} | Devices: {jax.device_count()} | Backend: {jax.default_backend()}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIG
@@ -52,30 +46,30 @@ print(f"Backend: {jax.default_backend()}")
 
 @dataclass
 class ModelConfig:
-    vocab_size: int = 8000  # Adaptive, set after tokenizer training
+    vocab_size: int = 8000
     d_model: int = 256
     n_heads: int = 8
     n_layers: int = 6
     d_ff: int = 1024
-    max_seq_len: int = 512
+    max_seq_len: int = 256  # Smaller for small dataset
     dropout: float = 0.1
     use_rope: bool = True
     norm_eps: float = 1e-5
 
+    def to_dict(self):
+        return {k: getattr(self, k) for k in self.__dataclass_fields__}
+
 
 @dataclass
 class TrainConfig:
-    batch_size: int = 64  # Larger batch for TPU
-    grad_accum_steps: int = 4
-    max_steps: int = 20000
+    batch_size: int = 16  # Smaller batch for small dataset
+    max_steps: int = 10000
     learning_rate: float = 3e-4
-    min_lr: float = 1e-5
-    warmup_steps: int = 500
     weight_decay: float = 0.1
     max_grad_norm: float = 1.0
     log_every: int = 50
     eval_every: int = 500
-    save_every: int = 5000
+    save_every: int = 2000
     checkpoint_dir: str = "/kaggle/working/checkpoints" if os.path.exists("/kaggle") else "checkpoints"
 
 
@@ -83,8 +77,7 @@ class TrainConfig:
 # MODEL (JAX/Flax)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def precompute_rope(dim: int, max_seq_len: int = 2048, base: float = 10000.0):
-    """Precompute RoPE sin/cos tables."""
+def precompute_rope(dim, max_seq_len=2048, base=10000.0):
     inv_freq = 1.0 / (base ** (jnp.arange(0, dim, 2).astype(jnp.float32) / dim))
     t = jnp.arange(max_seq_len, dtype=jnp.float32)
     freqs = jnp.outer(t, inv_freq)
@@ -92,18 +85,12 @@ def precompute_rope(dim: int, max_seq_len: int = 2048, base: float = 10000.0):
     return jnp.cos(emb), jnp.sin(emb)
 
 
-def apply_rope(x: jnp.ndarray, cos: jnp.ndarray, sin: jnp.ndarray, offset: int = 0):
-    """Apply rotary position embedding."""
+def apply_rope(x, cos, sin):
     seq_len = x.shape[-2]
-    cos_slice = cos[offset:offset + seq_len]
-    sin_slice = sin[offset:offset + seq_len]
-
-    # Reshape for broadcasting: (seq_len, head_dim) -> (1, 1, seq_len, head_dim)
-    cos_slice = cos_slice[jnp.newaxis, jnp.newaxis, :, :]
-    sin_slice = sin_slice[jnp.newaxis, jnp.newaxis, :, :]
-
+    cos_s = cos[:seq_len][jnp.newaxis, jnp.newaxis, :, :]
+    sin_s = sin[:seq_len][jnp.newaxis, jnp.newaxis, :, :]
     x1, x2 = jnp.split(x, 2, axis=-1)
-    return jnp.concatenate([-x2, x1], axis=-1) * sin_slice + x * cos_slice
+    return jnp.concatenate([-x2, x1], axis=-1) * sin_s + x * cos_s
 
 
 class RMSNorm(nn.Module):
@@ -129,6 +116,17 @@ class SwiGLU(nn.Module):
         return w2(jax.nn.silu(w1(x)) * w3(x))
 
 
+class Embedding(nn.Module):
+    num_embeddings: int
+    features: int
+
+    @nn.compact
+    def __call__(self, x):
+        emb = self.param("embedding", jax.nn.initializers.normal(stddev=0.02),
+                          (self.num_embeddings, self.features))
+        return emb[x]
+
+
 class MultiHeadAttention(nn.Module):
     d_model: int
     n_heads: int
@@ -139,24 +137,20 @@ class MultiHeadAttention(nn.Module):
     @nn.compact
     def __call__(self, x, mask, deterministic=True):
         head_dim = self.d_model // self.n_heads
-
         q = nn.Dense(self.d_model, use_bias=False, name="q_proj")(x)
         k = nn.Dense(self.d_model, use_bias=False, name="k_proj")(x)
         v = nn.Dense(self.d_model, use_bias=False, name="v_proj")(x)
 
-        # Reshape to (batch, seq, heads, head_dim) then transpose to (batch, heads, seq, head_dim)
         B, T, _ = x.shape
         q = q.reshape(B, T, self.n_heads, head_dim).transpose(0, 2, 1, 3)
         k = k.reshape(B, T, self.n_heads, head_dim).transpose(0, 2, 1, 3)
         v = v.reshape(B, T, self.n_heads, head_dim).transpose(0, 2, 1, 3)
 
-        # Apply RoPE
         if self.use_rope:
             cos, sin = precompute_rope(head_dim, self.max_seq_len)
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-        # Attention
         scale = 1.0 / math.sqrt(head_dim)
         attn = jnp.matmul(q, k.transpose(0, 1, 3, 2)) * scale
         attn = jnp.where(mask == 0, jnp.finfo(jnp.float32).min, attn)
@@ -181,31 +175,15 @@ class TransformerBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x, mask, deterministic=True):
-        # Pre-norm attention
         normed = RMSNorm(self.d_model, self.norm_eps, name="ln1")(x)
-        attn_out = MultiHeadAttention(
+        x = x + MultiHeadAttention(
             self.d_model, self.n_heads, self.max_seq_len, self.dropout, self.use_rope, name="attn"
         )(normed, mask, deterministic)
-        x = x + attn_out
 
-        # Pre-norm FF
         normed = RMSNorm(self.d_model, self.norm_eps, name="ln2")(x)
-        ff_out = SwiGLU(self.d_model, self.d_ff, name="ff")(normed)
-        ff_out = nn.Dropout(rate=self.dropout)(ff_out, deterministic=deterministic)
-        x = x + ff_out
-
+        x = x + SwiGLU(self.d_model, self.d_ff, name="ff")(normed)
+        x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
         return x
-
-
-class Embedding(nn.Module):
-    """Custom embedding layer since flax.linen removed nn.Embedding."""
-    num_embeddings: int
-    features: int
-
-    @nn.compact
-    def __call__(self, x):
-        embedding = self.param("embedding", jax.nn.initializers.normal(stddev=0.02), (self.num_embeddings, self.features))
-        return embedding[x]
 
 
 class SpaceLLM(nn.Module):
@@ -216,119 +194,71 @@ class SpaceLLM(nn.Module):
         cfg = self.config
         B, T = input_ids.shape
 
-        # Token embedding
         x = Embedding(cfg.vocab_size, cfg.d_model, name="tok_emb")(input_ids)
         x = nn.Dropout(rate=cfg.dropout)(x, deterministic=deterministic)
 
-        # Causal mask: (1, 1, T, T)
-        mask = jnp.tril(jnp.ones((T, T), dtype=jnp.float32))
-        mask = mask[jnp.newaxis, jnp.newaxis, :, :]
+        mask = jnp.tril(jnp.ones((T, T), dtype=jnp.float32))[jnp.newaxis, jnp.newaxis, :, :]
 
-        # Transformer blocks
         for i in range(cfg.n_layers):
             x = TransformerBlock(
                 cfg.d_model, cfg.n_heads, cfg.d_ff, cfg.max_seq_len,
                 cfg.dropout, cfg.use_rope, cfg.norm_eps, name=f"layer_{i}"
             )(x, mask, deterministic)
 
-        # Final norm + LM head
         x = RMSNorm(cfg.d_model, cfg.norm_eps, name="ln_f")(x)
-
-        # Tied weights with embedding
         embedding = self.variables["params"]["tok_emb"]["embedding"]
         logits = jnp.dot(x, embedding.T)
-
         return logits
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TRAINING STATE
+# TRAINING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TrainState(train_state.TrainState):
-    rng: jnp.ndarray
-
-
-def create_train_state(rng, config: ModelConfig, learning_rate: float, weight_decay: float):
-    """Create training state with AdamW optimizer."""
-    model = SpaceLLM(config)
-    dummy_input = jnp.zeros((1, config.max_seq_len), dtype=jnp.int32)
-    params = model.init(rng, dummy_input, deterministic=True)["params"]
-
-    # Count parameters
-    param_count = sum(np.prod(p.shape) for p in jax.tree_util.tree_leaves(params))
-    print(f"Parameters: {param_count:,}")
-
-    # AdamW optimizer
-    tx = optax.adamw(
-        learning_rate=learning_rate,
-        b1=0.9,
-        b2=0.95,
-        weight_decay=weight_decay,
-    )
-
-    return TrainState.create(
-        apply_fn=model.apply,
-        params=params,
-        tx=tx,
-        rng=rng,
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LOSS & TRAINING STEP
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def compute_loss(params, apply_fn, input_ids, targets, rng, deterministic=False):
-    """Compute cross-entropy loss."""
-    logits = apply_fn({"params": params}, input_ids, deterministic=deterministic, rngs={"dropout": rng})
-    # Shift for next-token prediction
+def compute_loss(params, apply_fn, input_ids, targets, rng):
+    logits = apply_fn({"params": params}, input_ids, deterministic=False, rngs={"dropout": rng})
     logits = logits[:, :-1, :]
     targets = targets[:, 1:]
-    # Flatten
-    logits = logits.reshape(-1, logits.shape[-1])
-    targets = targets.reshape(-1)
-    # Cross-entropy
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
-    return loss.mean()
+    return optax.softmax_cross_entropy_with_integer_labels(
+        logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)
+    ).mean()
 
 
-@jax.jit
-def train_step(state, input_ids, targets):
-    """Single training step with gradient accumulation."""
-    rng, new_rng = jax.random.split(state.rng)
+def train_step_fn(params, apply_fn, input_ids, targets, rng):
+    """Compute loss and gradients (not jitted - we jit the outer call)."""
+    def loss_fn(p):
+        return compute_loss(p, apply_fn, input_ids, targets, rng)
 
-    def loss_fn(params):
-        return compute_loss(params, state.apply_fn, input_ids, targets, rng)
-
-    loss, grads = jax.value_and_grad(loss_fn)(state.params)
+    loss, grads = jax.value_and_grad(loss_fn)(params)
 
     # Gradient clipping
     grads_norm = jnp.sqrt(sum(jnp.sum(g ** 2) for g in jax.tree_util.tree_leaves(grads)))
     clip_factor = jnp.minimum(1.0, 1.0 / (grads_norm + 1e-8))
     grads = jax.tree.map(lambda g: g * clip_factor, grads)
 
-    state = state.apply_gradients(grads=grads, rng=new_rng)
-    return state, loss, grads_norm
+    return loss, grads, grads_norm
 
 
-@jax.jit
-def eval_step(state, input_ids, targets):
-    """Evaluation step."""
-    rng = jax.random.PRNGKey(0)
-    return compute_loss(state.params, state.apply_fn, input_ids, targets, rng, deterministic=True)
+def eval_fn(params, apply_fn, input_ids, targets, rng):
+    logits = apply_fn({"params": params}, input_ids, deterministic=True)
+    logits = logits[:, :-1, :]
+    targets = targets[:, 1:]
+    return optax.softmax_cross_entropy_with_integer_labels(
+        logits.reshape(-1, logits.shape[-1]), targets.reshape(-1)
+    ).mean()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LEARNING RATE SCHEDULE
-# ═══════════════════════════════════════════════════════════════════════════════
+# JIT the key functions
+train_step_jit = jax.jit(train_step_fn, static_argnums=(1,))
+eval_jit = jax.jit(eval_fn, static_argnums=(1,))
+
 
 def get_lr(step, warmup, max_steps, lr, min_lr):
     if step < warmup:
-        return lr * step / warmup
+        return lr * step / max(warmup, 1)
     if step > max_steps:
         return min_lr
-    progress = (step - warmup) / (max_steps - warmup)
+    progress = (step - warmup) / max(max_steps - warmup, 1)
     return min_lr + 0.5 * (lr - min_lr) * (1 + math.cos(math.pi * progress))
 
 
@@ -349,7 +279,7 @@ def clean_text(text):
 
 
 def download_wikipedia():
-    print("[Wikipedia] Downloading space articles via API...")
+    print("[Wikipedia] Downloading space articles...")
     texts = []
     session = requests.Session()
     session.headers.update({"User-Agent": "SpaceLLM/1.0 (educational)"})
@@ -431,7 +361,6 @@ def download_arxiv():
 
 
 def generate_space_knowledge():
-    """Comprehensive space knowledge base."""
     knowledge = []
 
     planets = {
@@ -450,34 +379,34 @@ def generate_space_knowledge():
     stellar = [
         "Stars are massive celestial bodies that produce light and heat through nuclear fusion in their cores. They form from clouds of gas and dust called nebulae. The life cycle of a star depends on its mass. Low-mass stars like our Sun become red giants and then white dwarfs. High-mass stars can explode as supernovae and become neutron stars or black holes.",
         "The Sun is a G-type main-sequence star at the center of our solar system. It contains 99.86 percent of the mass in the solar system. The Sun core temperature reaches 15 million degrees Celsius, where hydrogen atoms fuse into helium. The Sun is approximately 4.6 billion years old and is expected to continue burning for another 5 billion years.",
-        "A supernova is a powerful stellar explosion that occurs at the end of a massive star life cycle. Supernovae are so bright they can outshine entire galaxies for weeks. They create and distribute heavy elements like gold, platinum, and uranium into space, seeding future generations of stars and planets.",
-        "Black holes are regions of spacetime where gravity is so strong that nothing, not even light, can escape once past the event horizon. The first image of a black hole was captured in 2019 by the Event Horizon Telescope, showing the supermassive black hole in galaxy M87. Sagittarius A star is the supermassive black hole at the center of our Milky Way galaxy.",
-        "Neutron stars are the collapsed cores of massive stars that have undergone supernova explosions. They are incredibly dense, with a mass of 1.4 to 2 solar masses packed into a sphere only about 20 km in diameter. A teaspoon of neutron star material would weigh about 6 billion tons.",
+        "A supernova is a powerful stellar explosion that occurs at the end of a massive star life cycle. Supernovae are so bright they can outshine entire galaxies for weeks. They create and distribute heavy elements like gold, platinum, and uranium into space.",
+        "Black holes are regions of spacetime where gravity is so strong that nothing, not even light, can escape once past the event horizon. The first image of a black hole was captured in 2019 by the Event Horizon Telescope. Sagittarius A star is the supermassive black hole at the center of our Milky Way galaxy.",
+        "Neutron stars are the collapsed cores of massive stars that have undergone supernova explosions. They are incredibly dense, with a mass of 1.4 to 2 solar masses packed into a sphere only about 20 km in diameter.",
         "White dwarfs are the remnants of low and medium-mass stars after they exhaust their nuclear fuel. They are about the size of Earth but have a mass similar to the Sun. The Chandrasekhar limit of 1.4 solar masses is the maximum mass a white dwarf can have before it collapses.",
     ]
     for text in stellar:
         knowledge.extend([text, f"Question: {text.split('.')[0]}?\nAnswer: {text}"])
 
     cosmology = [
-        "The Milky Way is the galaxy that contains our solar system. It is a barred spiral galaxy with a diameter of approximately 100,000 light-years and contains between 100 billion and 400 billion stars. The supermassive black hole at its center has a mass of about 4 million times that of our Sun.",
-        "Dark matter is a hypothetical form of matter that does not emit or interact with electromagnetic radiation. It is estimated to make up about 27 percent of the total mass-energy content of the universe. Evidence comes from gravitational effects on visible matter.",
+        "The Milky Way is the galaxy that contains our solar system. It is a barred spiral galaxy with a diameter of approximately 100,000 light-years and contains between 100 billion and 400 billion stars.",
+        "Dark matter is a hypothetical form of matter that does not emit or interact with electromagnetic radiation. It makes up about 27 percent of the total mass-energy content of the universe.",
         "Dark energy is a hypothetical form of energy that permeates all of space and causes the accelerating expansion of the universe. It makes up about 68 percent of the total mass-energy content of the universe.",
-        "The Big Bang theory describes the origin of the universe as an extremely hot and dense state approximately 13.8 billion years ago. Key evidence includes the cosmic microwave background radiation, the abundance of light elements, and the redshift of distant galaxies.",
-        "Exoplanets are planets that orbit stars outside our solar system. The Kepler space telescope discovered over 2,600 exoplanets. The James Webb Space Telescope is now characterizing exoplanet atmospheres.",
-        "Gravitational waves are ripples in spacetime caused by accelerating massive objects, predicted by Albert Einstein in 1916. They were first directly detected in 2015 by LIGO from the merger of two black holes.",
-        "Einstein theory of general relativity describes gravity as the curvature of spacetime caused by mass and energy. It predicts the bending of light by gravity, time dilation near massive objects, and the existence of black holes.",
+        "The Big Bang theory describes the origin of the universe as an extremely hot and dense state approximately 13.8 billion years ago.",
+        "Exoplanets are planets that orbit stars outside our solar system. The Kepler space telescope discovered over 2,600 exoplanets.",
+        "Gravitational waves are ripples in spacetime caused by accelerating massive objects, predicted by Albert Einstein in 1916. They were first directly detected in 2015 by LIGO.",
+        "Einstein theory of general relativity describes gravity as the curvature of spacetime caused by mass and energy.",
     ]
     for text in cosmology:
         knowledge.extend([text, f"Question: {text.split('.')[0]}?\nAnswer: {text}"])
 
     exploration = [
-        "The Apollo program was NASA human spaceflight program that landed the first humans on the Moon. Apollo 11 landed on July 20, 1969. Neil Armstrong was the first person to walk on the lunar surface. In total, 12 astronauts walked on the Moon during six Apollo missions.",
+        "The Apollo program was NASA human spaceflight program that landed the first humans on the Moon. Apollo 11 landed on July 20, 1969. Neil Armstrong was the first person to walk on the lunar surface.",
         "The International Space Station is a modular space station in low Earth orbit. It has been continuously occupied since November 2000. The station orbits Earth approximately every 90 minutes at an altitude of about 408 km.",
         "The Hubble Space Telescope was launched in 1990 and has made over 1.5 million observations. It has helped determine the age of the universe at 13.8 billion years.",
-        "The James Webb Space Telescope is the largest and most powerful space telescope ever built, launched on December 25, 2021. It observes in infrared light and can see the earliest galaxies formed after the Big Bang.",
-        "Voyager 1 and Voyager 2 are NASA space probes launched in 1977. Voyager 1 is the most distant human-made object, currently over 24 billion km from Earth. Voyager 1 entered interstellar space in 2012.",
-        "The Curiosity rover landed on Mars on August 6, 2012. The Perseverance rover landed on February 18, 2021, and is collecting samples for future return to Earth. The Ingenuity helicopter made the first powered flight on another planet.",
-        "SpaceX is revolutionizing space travel with reusable rockets. The Falcon 9 rocket has successfully landed and been reused over 200 times. The Starship vehicle is designed for missions to the Moon and Mars.",
+        "The James Webb Space Telescope is the largest and most powerful space telescope ever built, launched on December 25, 2021. It observes in infrared light.",
+        "Voyager 1 and Voyager 2 are NASA space probes launched in 1977. Voyager 1 is the most distant human-made object, currently over 24 billion km from Earth.",
+        "The Curiosity rover landed on Mars on August 6, 2012. The Perseverance rover landed on February 18, 2021, and is collecting samples for future return to Earth.",
+        "SpaceX is revolutionizing space travel with reusable rockets. The Falcon 9 rocket has successfully landed and been reused over 200 times.",
     ]
     for text in exploration:
         knowledge.extend([text, f"Question: {text.split('.')[0]}?\nAnswer: {text}"])
@@ -562,49 +491,49 @@ def prepare_data():
 
 
 def make_batches(data, seq_len, batch_size):
-    """Create batches from token array."""
+    """Create batches of shape (n_batches, batch_size, seq_len)."""
     n = len(data)
-    n_batches = (n - seq_len - 1) // (batch_size * seq_len)
-    data = data[:n_batches * batch_size * seq_len + seq_len + 1]
+    # Total sequences we can extract
+    n_seq = (n - 1) // seq_len
+    # Truncate to fit batch_size
+    n_batches = n_seq // batch_size
+    if n_batches == 0:
+        return np.zeros((0, batch_size, seq_len), dtype=np.int32), np.zeros((0, batch_size, seq_len), dtype=np.int32)
 
+    # Reshape into sequences
+    trimmed = data[:n_batches * batch_size * seq_len + 1]
     inputs = []
     targets = []
     for i in range(n_batches * batch_size):
         start = i * seq_len
-        chunk = data[start:start + seq_len + 1]
+        chunk = trimmed[start:start + seq_len + 1]
         inputs.append(chunk[:-1])
         targets.append(chunk[1:])
 
-    inputs = np.array(inputs, dtype=np.int32).reshape(batch_size, n_batches, seq_len)
-    targets = np.array(targets, dtype=np.int32).reshape(batch_size, n_batches, seq_len)
-
-    # Transpose to (n_batches, batch_size, seq_len) for iteration
-    return inputs.transpose(1, 0, 2), targets.transpose(1, 0, 2)
+    inputs = np.array(inputs, dtype=np.int32).reshape(n_batches, batch_size, seq_len)
+    targets = np.array(targets, dtype=np.int32).reshape(n_batches, batch_size, seq_len)
+    return inputs, targets
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GENERATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def generate(state, tokenizer, prompt, max_new_tokens=150, temperature=0.7, top_k=40):
-    """Generate text from a prompt."""
+def generate(params, apply_fn, tokenizer, prompt, max_new_tokens=150, temperature=0.7, top_k=40):
     ids = tokenizer.encode(prompt, out_type=int)
     input_ids = jnp.array([ids], dtype=jnp.int32)
 
     for _ in range(max_new_tokens):
-        logits = state.apply_fn({"params": state.params}, input_ids, deterministic=True)
+        logits = apply_fn({"params": params}, input_ids, deterministic=True)
         next_logits = logits[0, -1, :] / temperature
 
-        # Top-k
         if top_k > 0:
             top_k_val = jnp.sort(next_logits)[-top_k]
             next_logits = jnp.where(next_logits < top_k_val, jnp.finfo(jnp.float32).min, next_logits)
 
-        # Sample
         probs = jax.nn.softmax(next_logits)
         rng = jax.random.PRNGKey(int(time.time() * 1000) % (2**31))
         next_token = jax.random.categorical(rng, jnp.log(probs))
-
         input_ids = jnp.concatenate([input_ids, next_token[jnp.newaxis, jnp.newaxis]], axis=1)
 
     return tokenizer.decode(input_ids[0].tolist())
@@ -628,12 +557,27 @@ def train():
     # Config
     model_config = ModelConfig(vocab_size=meta["vocab_size"])
     train_config = TrainConfig()
+    print(f"Vocab: {model_config.vocab_size} | Seq: {model_config.max_seq_len} | Batch: {train_config.batch_size}")
 
-    print(f"Vocab size: {model_config.vocab_size}")
-
-    # Create model state
+    # Create model
+    model = SpaceLLM(model_config)
     rng = jax.random.PRNGKey(42)
-    state = create_train_state(rng, model_config, train_config.learning_rate, train_config.weight_decay)
+    dummy_input = jnp.zeros((1, model_config.max_seq_len), dtype=jnp.int32)
+    params = model.init(rng, dummy_input, deterministic=True)["params"]
+
+    param_count = sum(np.prod(p.shape) for p in jax.tree_util.tree_leaves(params))
+    print(f"Parameters: {param_count:,}")
+
+    # Optimizer with cosine schedule
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=train_config.learning_rate,
+        warmup_steps=500,
+        decay_steps=train_config.max_steps,
+        end_value=1e-5,
+    )
+    tx = optax.adamw(learning_rate=lr_schedule, b1=0.9, b2=0.95, weight_decay=train_config.weight_decay)
+    opt_state = tx.init(params)
 
     # Load data
     train_data = np.load(f"{base_dir}/data/tokenized/train.npy")
@@ -646,6 +590,11 @@ def train():
     n_val_batches = min(20, len(val_inputs))
 
     print(f"Train batches: {n_train_batches}, Val batches: {n_val_batches}")
+
+    if n_train_batches == 0:
+        print("[ERROR] No training batches! Reduce batch_size or seq_len.")
+        return
+
     print(f"\n{'='*60}")
     print(f"Training on TPU: {train_config.max_steps} steps")
     print(f"{'='*60}\n")
@@ -660,7 +609,6 @@ def train():
     rng = jax.random.PRNGKey(42)
 
     while step < train_config.max_steps:
-        # Shuffle batches
         perm = np.random.permutation(n_train_batches)
 
         for batch_idx in range(n_train_batches):
@@ -671,13 +619,16 @@ def train():
             input_ids = jnp.array(train_inputs[idx])
             targets = jnp.array(train_targets[idx])
 
-            # Update learning rate
-            lr = get_lr(step, train_config.warmup_steps, train_config.max_steps,
-                       train_config.learning_rate, train_config.min_lr)
-            state = state.replace(opt_state=optax.inject_hyperparams(state.tx.update)(lr, state.opt_state))
+            # Split RNG
+            rng, step_rng = jax.random.split(rng)
 
             # Train step
-            state, loss, grad_norm = train_step(state, input_ids, targets)
+            loss, grads, grad_norm = train_step_jit(params, model.apply, input_ids, targets, step_rng)
+
+            # Update params
+            updates, opt_state = tx.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+
             total_loss += loss.item()
             step += 1
 
@@ -685,42 +636,38 @@ def train():
             if step % train_config.log_every == 0:
                 avg = total_loss / train_config.log_every
                 elapsed = time.time() - start_time
+                lr = float(lr_schedule(step))
                 print(f"Step {step:>6d}/{train_config.max_steps} | Loss: {avg:.4f} | LR: {lr:.2e} | Grad: {grad_norm:.2f} | Time: {elapsed:.0f}s")
                 total_loss = 0.0
 
             # Eval
-            if step % train_config.eval_every == 0:
+            if step % train_config.eval_every == 0 and n_val_batches > 0:
                 val_losses = []
                 for i in range(n_val_batches):
-                    vloss = eval_step(state, jnp.array(val_inputs[i]), jnp.array(val_targets[i]))
-                    val_losses.append(vloss.item())
+                    rng, eval_rng = jax.random.split(rng)
+                    vloss = eval_jit(params, model.apply, jnp.array(val_inputs[i]), jnp.array(val_targets[i]), eval_rng)
+                    val_losses.append(float(vloss))
                 val_loss = np.mean(val_losses)
                 ppl = math.exp(val_loss)
                 print(f"  [Eval] Val Loss: {val_loss:.4f} | Perplexity: {ppl:.2f}")
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    # Save checkpoint
-                    import pickle
                     with open(f"{train_config.checkpoint_dir}/best.pkl", "wb") as f:
-                        pickle.dump({"step": step, "params": jax.device_get(state.params), "val_loss": val_loss}, f)
+                        pickle.dump({"step": step, "params": jax.device_get(params), "val_loss": val_loss}, f)
                     print(f"  [Checkpoint] Saved best model")
 
-            # Save periodic checkpoint
+            # Save periodic
             if step % train_config.save_every == 0:
-                import pickle
                 with open(f"{train_config.checkpoint_dir}/step_{step}.pkl", "wb") as f:
-                    pickle.dump({"step": step, "params": jax.device_get(state.params)}, f)
+                    pickle.dump({"step": step, "params": jax.device_get(params)}, f)
 
     # Save final
-    import pickle
     with open(f"{train_config.checkpoint_dir}/final.pkl", "wb") as f:
-        pickle.dump({"step": step, "params": jax.device_get(state.params), "val_loss": best_val_loss}, f)
+        pickle.dump({"step": step, "params": jax.device_get(params), "val_loss": best_val_loss}, f)
 
-    # Save config
     with open(f"{train_config.checkpoint_dir}/model_config.json", "w") as f:
-        json.dump({"vocab_size": model_config.vocab_size, "d_model": 256, "n_heads": 8,
-                    "n_layers": 6, "d_ff": 1024, "max_seq_len": 512}, f, indent=2)
+        json.dump(model_config.to_dict(), f, indent=2)
 
     elapsed = time.time() - start_time
     print(f"\n{'='*60}")
@@ -729,9 +676,10 @@ def train():
 
     # Generate samples
     print("\n--- Sample Generations ---")
+    apply_fn = jax.jit(model.apply, static_argnums=())
     for prompt in ["Question: What is a black hole?\nAnswer:", "Question: How far is Mars?\nAnswer:", "The Sun is a star that"]:
         print(f"\nQ: {prompt}")
-        print(f"A: {generate(state, tokenizer, prompt)}")
+        print(f"A: {generate(params, model.apply, tokenizer, prompt)}")
 
 
 if __name__ == "__main__":
