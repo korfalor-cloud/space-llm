@@ -112,7 +112,7 @@ class RMSNorm(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        scale = self.param("scale", nn.initializers.ones, (self.dim,))
+        scale = self.param("scale", jax.nn.initializers.ones, (self.dim,))
         rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.eps)
         return x / rms * scale
 
@@ -126,7 +126,7 @@ class SwiGLU(nn.Module):
         w1 = nn.Dense(self.d_ff, use_bias=False, name="w1")
         w2 = nn.Dense(self.d_model, use_bias=False, name="w2")
         w3 = nn.Dense(self.d_ff, use_bias=False, name="w3")
-        return w2(nn.silu(w1(x)) * w3(x))
+        return w2(jax.nn.silu(w1(x)) * w3(x))
 
 
 class MultiHeadAttention(nn.Module):
@@ -160,7 +160,7 @@ class MultiHeadAttention(nn.Module):
         scale = 1.0 / math.sqrt(head_dim)
         attn = jnp.matmul(q, k.transpose(0, 1, 3, 2)) * scale
         attn = jnp.where(mask == 0, jnp.finfo(jnp.float32).min, attn)
-        attn = nn.softmax(attn, axis=-1)
+        attn = jax.nn.softmax(attn, axis=-1)
         attn = nn.Dropout(rate=self.dropout)(attn, deterministic=deterministic)
 
         out = jnp.matmul(attn, v)
@@ -590,7 +590,7 @@ def generate(state, tokenizer, prompt, max_new_tokens=150, temperature=0.7, top_
             next_logits = jnp.where(next_logits < top_k_val, jnp.finfo(jnp.float32).min, next_logits)
 
         # Sample
-        probs = nn.softmax(next_logits)
+        probs = jax.nn.softmax(next_logits)
         rng = jax.random.PRNGKey(int(time.time() * 1000) % (2**31))
         next_token = jax.random.categorical(rng, jnp.log(probs))
 
